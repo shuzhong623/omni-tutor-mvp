@@ -30,7 +30,7 @@ with st.sidebar:
 # ================= 3. 核心逻辑配置 =================
 if api_key:
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     st.warning("⚠️ 请在左侧输入 API Key 以激活 AI 老师")
     st.stop() # 只有输入Key后才会显示下方内容
