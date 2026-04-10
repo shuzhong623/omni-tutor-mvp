@@ -5,9 +5,10 @@ import streamlit.components.v1 as components
 import PIL.Image
 import requests
 import base64
+import re
 from streamlit_mic_recorder import mic_recorder
 
-# ================= 1. 页面配置与视觉样式 =================
+# ================= 1. 页面配置 =================
 st.set_page_config(page_title="Omni-Tutor Pro", layout="wide", page_icon="🌟")
 
 st.markdown("""
@@ -36,34 +37,44 @@ if not gemini_key:
 genai.configure(api_key=gemini_key)
 model = genai.GenerativeModel(target_model_name)
 
-# ================= 3. 核心功能 =================
+# ================= 3. 核心功能模块 =================
+
+# --- 新增：语音纯净过滤器 ---
+def clean_text_for_tts(text):
+    """删除音标、括号、特殊符号，确保 TTS 不会读出奇怪的字符"""
+    # 1. 删除 /ai/ 这种音标
+    text = re.sub(r'/[^/]+/?', '', text)
+    # 2. 删除 (括号内容) 
+    text = re.sub(r'\(.*?\)', '', text)
+    # 3. 删除 [标签]
+    text = re.sub(r'\[.*?\]', '', text)
+    # 4. 删除多余的星号 (Gemini 常用的加粗符号)
+    text = text.replace('*', '')
+    # 5. 删除多余的引号
+    text = text.replace('"', '').replace('$', '')
+    return text.strip()
 
 def get_google_tts_audio(text):
     if not tts_key:
         return None
     try:
+        # 使用过滤后的纯净文字进行合成
+        clean_text = clean_text_for_tts(text)
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
-        
-        # --- 核心修改点：删除具体声音名称(name)，仅保留语言代码(languageCode) ---
-        # 这样 Google 会自动为你选择当前账户可用且最匹配的默认声音，彻底避免 400 错误
         lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
         
         payload = {
-            "input": {"text": text},
-            "voice": {"languageCode": lang_code}, # 不再指定 name
+            "input": {"text": clean_text},
+            "voice": {"languageCode": lang_code},
             "audioConfig": {"audioEncoding": "MP3"}
         }
         response = requests.post(url, json=payload)
-        
         if response.status_code != 200:
-            st.error(f"❌ TTS API 报错 ({response.status_code}): {response.text}")
             return None
-        
         audio_content = response.json().get("audioContent")
         if audio_content:
             return base64.b64decode(audio_content)
     except Exception as e:
-        st.error(f"TTS 系统故障: {e}")
         return None
 
 def get_full_prompt(module, content, is_vision=False, is_audio=False):
@@ -75,13 +86,21 @@ def get_full_prompt(module, content, is_vision=False, is_audio=False):
     mode_instruction = ""
     if lang_mode == "Mixed Mode":
         mode_instruction = "CRITICAL: You MUST use 'Mixed Mode'. Integrate English keywords -> Translation -> Example sentence naturally."
-    elif lang_mode == "English Only":
-        mode_instruction = "STRICTLY use English only."
-
+    
     constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions. Start with mood tag: [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
-    prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint}"
-    if is_vision: prompt += "\nVISION TASK: You see a photo. Interact with the objects."
-    if is_audio: prompt += "\nAUDIO TASK: Analyze pronunciation. Correct and provide a 'Perfect Version'."
+    
+    # --- 视觉诚实指令：解决 AI 胡乱猜测的问题 ---
+    vision_instruction = ""
+    if is_vision:
+        vision_instruction = "\nVISION TASK: You are looking at a real photo from the user. Please analyze it honestly. Be specific about objects and colors."
+    else:
+        vision_instruction = "\nIMPORTANT: You currently have NO visual input. If the user asks 'what do you see' or 'look at me', politely tell them that they need to take a photo first using the 'Take Photo' button."
+
+    prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint} {vision_instruction}"
+    
+    if is_audio:
+        prompt += "\nAUDIO TASK: Analyze user's pronunciation. Correct and provide a 'Perfect Version'."
+        
     return f"{prompt}\n\nUser: {content}"
 
 def handle_ai_response(module, user_input, media=None, audio_data=None):
@@ -111,7 +130,7 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
                 st.markdown('<div class="audio-container"><b>🎧 听听老师怎么说：</b></div>', unsafe_allow_html=True)
                 st.audio(audio_bytes, format="audio/mp3")
             else:
-                st.info("💡 提示：未能激活真人语音。请确认 API Key 已在 Cloud Console 中启用。")
+                st.info("💡 提示：未能激活真人语音。")
 
             st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
         except Exception as e:
@@ -132,8 +151,10 @@ with tab1:
     with col2:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
+    
     user_msg = st.text_input("你想对老师说什么？")
     if st.button("发送给老师"):
+        # 关键：确保图片被正确读取并传递
         media = PIL.Image.open(img_file) if img_file else None
         audio = audio_record['bytes'] if audio_record else None
         handle_ai_response("综合互动", user_msg if user_msg else "Please analyze!", media, audio)
