@@ -8,7 +8,7 @@ import base64
 import re
 from streamlit_mic_recorder import mic_recorder
 
-# ================= 1. 页面配置 =================
+# ================= 1. 页面配置与视觉样式 =================
 st.set_page_config(page_title="Omni-Tutor Pro", layout="wide", page_icon="🌟")
 
 st.markdown("""
@@ -18,6 +18,7 @@ st.markdown("""
     .avatar-container { text-align: center; margin-bottom: 10px; }
     .response-box { background-color: white; padding: 20px; border-radius: 15px; border-left: 5px solid #4A90E2; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); font-size: 18px; line-height: 1.6; }
     .audio-container { margin-bottom: 15px; background: #eef2f6; padding: 10px; border-radius: 10px; text-align: center; }
+    .transcript-box { background-color: #fffbe6; padding: 10px; border-radius: 10px; border: 1px dashed #ffe58f; color: #856404; font-style: italic; margin-bottom: 15px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -39,68 +40,51 @@ model = genai.GenerativeModel(target_model_name)
 
 # ================= 3. 核心功能模块 =================
 
-# --- 新增：语音纯净过滤器 ---
+# --- 新增：语音转文字函数 ---
+def transcribe_audio(audio_bytes):
+    """利用 Gemini 2.5 的原生多模态能力将语音转为文字"""
+    try:
+        # 极简 Prompt，要求 AI 只输出转写内容
+        prompt = "Please transcribe this audio to text. Output ONLY the transcribed words, no other text."
+        response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+        return response.text.strip()
+    except Exception as e:
+        return f"转写失败: {e}"
+
 def clean_text_for_tts(text):
-    """删除音标、括号、特殊符号，确保 TTS 不会读出奇怪的字符"""
-    # 1. 删除 /ai/ 这种音标
     text = re.sub(r'/[^/]+/?', '', text)
-    # 2. 删除 (括号内容) 
     text = re.sub(r'\(.*?\)', '', text)
-    # 3. 删除 [标签]
     text = re.sub(r'\[.*?\]', '', text)
-    # 4. 删除多余的星号 (Gemini 常用的加粗符号)
-    text = text.replace('*', '')
-    # 5. 删除多余的引号
-    text = text.replace('"', '').replace('$', '')
+    text = text.replace('*', '').replace('"', '').replace('$', '')
     return text.strip()
 
 def get_google_tts_audio(text):
-    if not tts_key:
-        return None
+    if not tts_key: return None
     try:
-        # 使用过滤后的纯净文字进行合成
-        clean_text = clean_text_for_tts(text)
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
         lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
-        
         payload = {
-            "input": {"text": clean_text},
+            "input": {"text": clean_text_for_tts(text)},
             "voice": {"languageCode": lang_code},
             "audioConfig": {"audioEncoding": "MP3"}
         }
         response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            return None
+        if response.status_code != 200: return None
         audio_content = response.json().get("audioContent")
-        if audio_content:
-            return base64.b64decode(audio_content)
-    except Exception as e:
-        return None
+        if audio_content: return base64.b64decode(audio_content)
+    except Exception: return None
 
 def get_full_prompt(module, content, is_vision=False, is_audio=False):
-    persona_map = {
-        "Baby": "亲切的幼儿园老师。多用叠词，简单温暖。",
-        "Pupil": "幽默博学的大哥哥/大姐姐。引导探索，知识游戏化。",
-        "Student": "睿智学术教练。苏格拉底式启发，简洁专业。"
-    }
+    persona_map = {"Baby": "亲切的幼儿园老师。多用叠词，简单温暖。", "Pupil": "幽默博学的大哥哥/大姐姐。引导探索，知识游戏化。", "Student": "睿智学术教练。苏格拉底式启发，简洁专业。"}
     mode_instruction = ""
     if lang_mode == "Mixed Mode":
         mode_instruction = "CRITICAL: You MUST use 'Mixed Mode'. Integrate English keywords -> Translation -> Example sentence naturally."
-    
+    elif lang_mode == "English Only":
+        mode_instruction = "STRICTLY use English only."
     constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions. Start with mood tag: [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
-    
-    # --- 视觉诚实指令：解决 AI 胡乱猜测的问题 ---
-    vision_instruction = ""
-    if is_vision:
-        vision_instruction = "\nVISION TASK: You are looking at a real photo from the user. Please analyze it honestly. Be specific about objects and colors."
-    else:
-        vision_instruction = "\nIMPORTANT: You currently have NO visual input. If the user asks 'what do you see' or 'look at me', politely tell them that they need to take a photo first using the 'Take Photo' button."
-
+    vision_instruction = "\nVISION TASK: You are looking at a photo. Analyze it honestly." if is_vision else "\nIMPORTANT: You have NO visual input. If asked, tell user to take a photo."
     prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint} {vision_instruction}"
-    
-    if is_audio:
-        prompt += "\nAUDIO TASK: Analyze user's pronunciation. Correct and provide a 'Perfect Version'."
-        
+    if is_audio: prompt += "\nAUDIO TASK: Analyze pronunciation. Correct and provide a 'Perfect Version'."
     return f"{prompt}\n\nUser: {content}"
 
 def handle_ai_response(module, user_input, media=None, audio_data=None):
@@ -111,10 +95,8 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
             content_list = [get_full_prompt(module, user_input, is_vision, is_audio)]
             if media: content_list.append(media)
             if audio_data: content_list.append({"mime_type": "audio/wav", "data": audio_data})
-            
             response = model.generate_content(content_list)
             full_text = response.text
-            
             moods = {"HAPPY": "😊", "THINKING": "🤔", "SURPRISED": "😲", "SERIOUS": "🧐"}
             mood = "DEFAULT"
             for tag, emoji in moods.items():
@@ -122,16 +104,11 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
                     mood = tag
                     full_text = full_text.replace(f"[{tag}]", "").strip()
                     break
-            
             st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{moods.get(mood, "🌟")}</div></div>', unsafe_allow_html=True)
-            
             audio_bytes = get_google_tts_audio(full_text)
             if audio_bytes:
                 st.markdown('<div class="audio-container"><b>🎧 听听老师怎么说：</b></div>', unsafe_allow_html=True)
                 st.audio(audio_bytes, format="audio/mp3")
-            else:
-                st.info("💡 提示：未能激活真人语音。")
-
             st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
         except Exception as e:
             st.error(f"错误: {e}")
@@ -151,13 +128,27 @@ with tab1:
     with col2:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
+        
+        # --- 核心升级：录音后立即转写文字 ---
+        if audio_record:
+            with st.spinner("正在将语音转化为文字..."):
+                transcript = transcribe_audio(audio_record['bytes'])
+                st.session_state['current_transcript'] = transcript
+        
+        if 'current_transcript' in st.session_state:
+            st.markdown(f'<div class="transcript-box"><b>🎙️ 你刚才说：</b> {st.session_state["current_transcript"]}</div>', unsafe_allow_html=True)
     
-    user_msg = st.text_input("你想对老师说什么？")
+    user_msg = st.text_input("你想对老师说什么？", placeholder="如果你录了音，可以直接点击发送；或者在这里输入问题")
+    
     if st.button("发送给老师"):
-        # 关键：确保图片被正确读取并传递
+        # 如果用户没打字但录了音，使用转写文字作为输入
+        final_msg = user_msg
+        if not final_msg and 'current_transcript' in st.session_state:
+            final_msg = st.session_state['current_transcript']
+            
         media = PIL.Image.open(img_file) if img_file else None
         audio = audio_record['bytes'] if audio_record else None
-        handle_ai_response("综合互动", user_msg if user_msg else "Please analyze!", media, audio)
+        handle_ai_response("综合互动", final_msg if final_msg else "Please analyze!", media, audio)
 
 with tab2:
     st.subheader("语言学习")
