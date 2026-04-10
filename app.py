@@ -3,11 +3,13 @@ import google.generativeai as genai
 import os
 import streamlit.components.v1 as components
 import PIL.Image
+import requests
+import base64
+from streamlit_mic_recorder import mic_recorder
 
 # ================= 1. 页面配置与视觉样式 =================
-st.set_page_config(page_title="Omni-Tutor AI", layout="wide", page_icon="🌟")
+st.set_page_config(page_title="Omni-Tutor Pro", layout="wide", page_icon="🌟")
 
-# 优化 UI 界面，让它看起来更像一个教育 App
 st.markdown("""
     <style>
     .main { background-color: #f5f7f9; }
@@ -17,145 +19,160 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏：用户设定 =================
+# ================= 2. 侧边栏：密钥与设定 =================
 with st.sidebar:
-    st.header("⚙️ 用户设定")
-    api_key = st.text_input("请输入 Gemini API Key:", type="password")
+    st.header("⚙️ 核心设置")
+    gemini_key = st.text_input("Gemini API Key:", type="password")
+    tts_key = st.text_input("Google TTS API Key:", type="password")
     
-    # 锁定你测试成功的最高版本模型
     target_model_name = "models/gemini-2.5-flash"
-    st.info(f"驱动模型: `{target_model_name}`")
-    
-    user_level = st.selectbox("选择用户级别", ["Baby", "Pupil", "Student"])
+    user_level = st.selectbox("用户级别", ["Baby", "Pupil", "Student"])
     lang_mode = st.selectbox("语言模式", ["English Only", "Chinese Only", "Mixed Mode"])
     
     st.divider()
-    st.markdown(f"**当前状态**\n\n级别: `{user_level}`\n模式: `{lang_mode}`")
+    st.markdown(f"**状态**: `{user_level}` | `{lang_mode}`")
 
-# ================= 3. 核心 AI 逻辑配置 =================
-if api_key:
-    genai.configure(api_key=api_key)
-    try:
-        model = genai.GenerativeModel(target_model_name)
-    except Exception as e:
-        st.error(f"模型初始化失败: {e}")
-        st.stop()
-else:
-    st.warning("⚠️ 请在左侧输入 API Key 以激活 AI 老师")
+if not gemini_key:
+    st.warning("⚠️ 请输入 Gemini API Key 以激活")
     st.stop()
 
-# 情感头像映射
-AVATARS = {"HAPPY": "😊", "THINKING": "🤔", "SURPRISED": "😲", "SERIOUS": "🧐", "DEFAULT": "🌟"}
+genai.configure(api_key=gemini_key)
+model = genai.GenerativeModel(target_model_name)
 
-# 语音合成函数 (调用浏览器内置 TTS)
-def speak_text(text):
-    lang = 'en-US' if lang_mode == "English Only" else 'zh-CN'
-    # 剔除情绪标签，只读正文
-    clean_text = text.replace("[HAPPY]", "").replace("[THINKING]", "").replace("[SURPRISED]", "").replace("[SERIOUS]", "")
-    js_code = f"""
-        <script>
-        var msg = new SpeechSynthesisUtterance({repr(clean_text)});
-        msg.lang = '{lang}';
-        window.speechSynthesis.speak(msg);
-        </script>
-    """
-    components.html(js_code, height=0)
+# ================= 3. 核心功能模块 =================
 
-# 优化后的 Prompt 生成 (彻底解决“剧本模式”问题)
-def get_full_prompt(module, content, is_vision=False):
+# --- 高质量 Google Cloud TTS 函数 ---
+def speak_with_google_tts(text):
+    if not tts_key:
+        st.info("未配置 TTS Key，将使用基础机器音。")
+        # 回退到基础浏览器语音
+        lang = 'en-US' if lang_mode == "English Only" else 'zh-CN'
+        js_code = f"<script>var msg = new SpeechSynthesisUtterance({repr(text)}); msg.lang = '{lang}'; window.speechSynthesis.speak(msg);</script>"
+        components.html(js_code, height=0)
+        return
+
+    try:
+        url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
+        # 根据模式选择语音类型
+        voice_name = "en-US-Neural2-F" if lang_mode == "English Only" else "zh-CN-Neural2-A"
+        payload = {
+            "input": {"text": text},
+            "voice": {"languageCode": "en-US" if lang_mode == "English Only" else "zh-CN", "name": voice_name},
+            "audioConfig": {"audioEncoding": "MP3"}
+        }
+        response = requests.post(url, json=payload)
+        audio_content = response.json().get("audioContent")
+        if audio_content:
+            audio_bytes = base64.b64decode(audio_content)
+            st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+    except Exception as e:
+        st.error(f"TTS 播放失败: {e}")
+
+# --- 增强版 Prompt (强制 Mixed Mode) ---
+def get_full_prompt(module, content, is_vision=False, is_audio=False):
     persona_map = {
-        "Baby": "你是一个超级亲切的幼儿园老师。请直接用最简单、最温暖的语言说话，多用叠词（如：小眼睛、亮亮的）和感叹词。不要写任何动作描述，直接对孩子说话。",
-        "Pupil": "你是一个幽默博学的大哥哥/大姐姐。说话要像在和好朋友聊天，鼓励对方探索，把知识点变成有趣的谜题。直接对话，不要写剧本提示。",
-        "Student": "你是一个睿智客观的学术教练。说话简洁、专业，多用启发式提问引导学生思考。直接提供学术引导，禁止输出动作描述。"
+        "Baby": "亲切的幼儿园老师。多用叠词，简单温暖。",
+        "Pupil": "幽默博学的大哥哥/大姐姐。引导探索，知识游戏化。",
+        "Student": "睿智学术教练。苏格拉底式启发，简洁专业。"
     }
     
-    # 强力约束指令：禁止输出括号里的动作描述
-    strict_constraint = """
-    IMPORTANT RULE: 
-    1. DO NOT include any stage directions, mood descriptions, or actions in parentheses (e.g., NO '(smiling)', NO '(slowly)').
-    2. ONLY output the words you would actually say aloud to the user.
-    3. If you feel an emotion, express it through your words, not by describing the emotion in brackets.
-    """
+    # 核心修改：强制 Mixed Mode 逻辑
+    mode_instruction = ""
+    if lang_mode == "Mixed Mode":
+        mode_instruction = """
+        CRITICAL TEACHING RULE: You MUST use 'Mixed Mode'. 
+        Even if the user speaks Chinese, you must:
+        1. Introduce 1-3 relevant English keywords or phrases in your answer.
+        2. Provide the English word -> Chinese translation -> Example sentence.
+        3. Encourage the user to repeat the English part.
+        Make it a natural part of the conversation, not a dictionary list.
+        """
+    elif lang_mode == "English Only":
+        mode_instruction = "STRICTLY use English only. Adjust vocabulary for the user level."
+
+    constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions like (smiling) or [HAPPY]. Start your response with a mood tag like [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
     
-    prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {strict_constraint}"
+    prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint}"
     
     if is_vision:
-        prompt += "\nVISION TASK: You are seeing a photo from the user's camera. Naturally talk about what you see. Interact with the objects in the image."
-    
-    prompt += "\nREQUIREMENT: Start your response with exactly one mood tag: [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
-    
+        prompt += "\nVISION TASK: You see a photo. Naturally integrate the visual objects into your teaching."
+    if is_audio:
+        prompt += "\nAUDIO TASK: You are listening to the user's pronunciation. Please analyze the grammar, fluency, and pronunciation. Correct the mistakes and provide a 'Perfect Version' for the user to mimic."
+        
     return f"{prompt}\n\nUser: {content}"
 
-# 统一响应处理函数
-def handle_ai_response(module, user_input, media=None):
-    with st.spinner("老师正在观察并思考..."):
+# ================= 4. 主界面 =================
+st.title("🌟 Omni-Tutor 全能AI老师 Pro")
+st.markdown("---")
+
+tab1, tab2, tab3 = st.tabs(["🎙️ 语音/视觉互动", "📚 语言学习", "🌍 知识星球"])
+
+def handle_ai_response(module, user_input, media=None, audio_data=None):
+    with st.spinner("老师正在倾听并思考..."):
         try:
             is_vision = True if media else False
-            content_list = [get_full_prompt(module, user_input, is_vision)]
-            if media: 
-                content_list.append(media)
+            is_audio = True if audio_data else False
+            
+            # 构建多模态输入列表
+            content_list = [get_full_prompt(module, user_input, is_vision, is_audio)]
+            if media: content_list.append(media)
+            if audio_data: 
+                # Gemini 2.5 处理音频文件的格式
+                content_list.append({"mime_type": "audio/wav", "data": audio_data})
                 
             response = model.generate_content(content_list)
             full_text = response.text
             
-            # 提取情绪标签
+            # 情绪处理
+            moods = {"HAPPY": "😊", "THINKING": "🤔", "SURPRISED": "😲", "SERIOUS": "🧐"}
             mood = "DEFAULT"
-            for tag in AVATARS.keys():
+            for tag, emoji in moods.items():
                 if f"[{tag}]" in full_text:
                     mood = tag
                     full_text = full_text.replace(f"[{tag}]", "").strip()
                     break
             
-            # 显示头像
-            st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{AVATARS[mood]}</div><p style="color: gray;">Omni-Tutor 此时心情: {mood}</p></div>', unsafe_allow_html=True)
-            
-            # 显示对话卡片
+            st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{moods.get(mood, "🌟")}</div></div>', unsafe_allow_html=True)
             st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
             
-            # 触发声音
-            speak_text(full_text)
+            # 使用 Google Cloud TTS 播放
+            speak_with_google_tts(full_text)
             
         except Exception as e:
-            st.error(f"老师在思考时出了点小问题: {e}")
+            st.error(f"错误: {e}")
 
-# ================= 4. 主界面 UI =================
-st.title("🌟 Omni-Tutor 实时互动版")
-st.markdown("---")
-
-tab1, tab2, tab3 = st.tabs(["📷 实时互动 (模拟直播)", "📚 语言学习", "🌍 知识星球"])
-
-# 模块 1：实时互动 (相机拍照)
+# --- 模块 1：综合互动 (相机 + 麦克风) ---
 with tab1:
-    st.subheader("模拟直播互动")
-    st.write("点击下方相机拍照，AI 老师会立即看到你并开始对话")
+    st.subheader("实时互动实验室")
+    col1, col2 = st.columns(2)
     
-    img_file = st.camera_input("捕捉现场画面")
-    user_msg = st.text_input("你想对老师说什么？", placeholder="例如：老师你看我手里拿的是什么？")
+    with col1:
+        st.write("📸 **视觉捕捉**")
+        img_file = st.camera_input("拍摄现场")
+    
+    with col2:
+        st.write("🎤 **语音输入 (发音练习)**")
+        audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
+    
+    user_msg = st.text_input("你想对老师说什么？", placeholder="例如：老师，我的发音对吗？")
     
     if st.button("发送给老师"):
-        if img_file:
-            img = PIL.Image.open(img_file)
-            handle_ai_response("直播互动", user_msg if user_msg else "Look at my picture and start a conversation!", img)
-        else:
-            handle_ai_response("直播互动", user_msg)
+        media = PIL.Image.open(img_file) if img_file else None
+        audio = audio_record['bytes'] if audio_record else None
+        handle_ai_response("综合互动", user_msg if user_msg else "Please analyze my photo or audio!", media, audio)
 
-# 模块 2：语言学习 (上传图片)
+# --- 模块 2：语言学习 ---
 with tab2:
-    st.subheader("语言学习 - 多模态实验室")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        upload_file = st.file_uploader("上传照片", type=["jpg", "png", "jpeg"])
-        text_input = st.text_input("对素材的要求", placeholder="例如：请翻译这段话并纠正我的语法")
-    with col2:
-        if st.button("开始分析"):
-            media_data = None
-            if upload_file:
-                media_data = PIL.Image.open(upload_file)
-            handle_ai_response("语言学习", text_input, media_data)
+    st.subheader("语言学习 - 深度分析")
+    up_file = st.file_uploader("上传照片", type=["jpg", "png"])
+    up_req = st.text_input("要求")
+    if st.button("开始分析"):
+        img = PIL.Image.open(up_file) if up_file else None
+        handle_ai_response("语言学习", up_req, img)
 
-# 模块 3：知识星球 (文字问答)
+# --- 模块 3：知识星球 ---
 with tab3:
     st.subheader("知识星球 - 全学科辅导")
-    q = st.text_input("想请教老师什么问题？", placeholder="例如：为什么天空是蓝色的？")
+    q = st.text_input("提问")
     if st.button("发送"):
         handle_ai_response("知识星球", q)
