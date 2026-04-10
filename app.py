@@ -14,8 +14,9 @@ st.markdown("""
     <style>
     .main { background-color: #f5f7f9; }
     .stButton>button { width: 100%; border-radius: 20px; height: 3em; background-color: #4A90E2; color: white; font-weight: bold; }
-    .avatar-container { text-align: center; margin-bottom: 20px; }
+    .avatar-container { text-align: center; margin-bottom: 10px; }
     .response-box { background-color: white; padding: 20px; border-radius: 15px; border-left: 5px solid #4A90E2; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); font-size: 18px; line-height: 1.6; }
+    .audio-container { margin-bottom: 15px; background: #eef2f6; padding: 10px; border-radius: 10px; text-align: center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -41,32 +42,30 @@ model = genai.GenerativeModel(target_model_name)
 
 # ================= 3. 核心功能模块 =================
 
-# --- 高质量 Google Cloud TTS 函数 ---
-def speak_with_google_tts(text):
+# --- 改进的 Google Cloud TTS 函数 (返回音频字节) ---
+def get_google_tts_audio(text):
     if not tts_key:
-        st.info("未配置 TTS Key，将使用基础机器音。")
-        # 回退到基础浏览器语音
-        lang = 'en-US' if lang_mode == "English Only" else 'zh-CN'
-        js_code = f"<script>var msg = new SpeechSynthesisUtterance({repr(text)}); msg.lang = '{lang}'; window.speechSynthesis.speak(msg);</script>"
-        components.html(js_code, height=0)
-        return
+        return None
 
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
-        # 根据模式选择语音类型
+        # 这里的逻辑：如果是 Mixed Mode 或 English，优先用英文高质语音，如果是中文则用中文
+        # 为了简单，这里根据 lang_mode 决定
         voice_name = "en-US-Neural2-F" if lang_mode == "English Only" else "zh-CN-Neural2-A"
+        lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
+        
         payload = {
             "input": {"text": text},
-            "voice": {"languageCode": "en-US" if lang_mode == "English Only" else "zh-CN", "name": voice_name},
+            "voice": {"languageCode": lang_code, "name": voice_name},
             "audioConfig": {"audioEncoding": "MP3"}
         }
         response = requests.post(url, json=payload)
         audio_content = response.json().get("audioContent")
         if audio_content:
-            audio_bytes = base64.b64decode(audio_content)
-            st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+            return base64.b64decode(audio_content)
     except Exception as e:
-        st.error(f"TTS 播放失败: {e}")
+        st.error(f"TTS 接口调用失败: {e}")
+        return None
 
 # --- 增强版 Prompt (强制 Mixed Mode) ---
 def get_full_prompt(module, content, is_vision=False, is_audio=False):
@@ -76,7 +75,6 @@ def get_full_prompt(module, content, is_vision=False, is_audio=False):
         "Student": "睿智学术教练。苏格拉底式启发，简洁专业。"
     }
     
-    # 核心修改：强制 Mixed Mode 逻辑
     mode_instruction = ""
     if lang_mode == "Mixed Mode":
         mode_instruction = """
@@ -85,19 +83,18 @@ def get_full_prompt(module, content, is_vision=False, is_audio=False):
         1. Introduce 1-3 relevant English keywords or phrases in your answer.
         2. Provide the English word -> Chinese translation -> Example sentence.
         3. Encourage the user to repeat the English part.
-        Make it a natural part of the conversation, not a dictionary list.
         """
     elif lang_mode == "English Only":
-        mode_instruction = "STRICTLY use English only. Adjust vocabulary for the user level."
+        mode_instruction = "STRICTLY use English only."
 
-    constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions like (smiling) or [HAPPY]. Start your response with a mood tag like [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
+    constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions. Start with mood tag: [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
     
     prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint}"
     
     if is_vision:
-        prompt += "\nVISION TASK: You see a photo. Naturally integrate the visual objects into your teaching."
+        prompt += "\nVISION TASK: You see a photo. Naturally integrate visual objects into teaching."
     if is_audio:
-        prompt += "\nAUDIO TASK: You are listening to the user's pronunciation. Please analyze the grammar, fluency, and pronunciation. Correct the mistakes and provide a 'Perfect Version' for the user to mimic."
+        prompt += "\nAUDIO TASK: Analyze user's pronunciation. Correct mistakes and provide a 'Perfect Version' for mimicry."
         
     return f"{prompt}\n\nUser: {content}"
 
@@ -113,17 +110,15 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
             is_vision = True if media else False
             is_audio = True if audio_data else False
             
-            # 构建多模态输入列表
             content_list = [get_full_prompt(module, user_input, is_vision, is_audio)]
             if media: content_list.append(media)
             if audio_data: 
-                # Gemini 2.5 处理音频文件的格式
                 content_list.append({"mime_type": "audio/wav", "data": audio_data})
                 
             response = model.generate_content(content_list)
             full_text = response.text
             
-            # 情绪处理
+            # 1. 处理情绪标签
             moods = {"HAPPY": "😊", "THINKING": "🤔", "SURPRISED": "😲", "SERIOUS": "🧐"}
             mood = "DEFAULT"
             for tag, emoji in moods.items():
@@ -132,24 +127,30 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
                     full_text = full_text.replace(f"[{tag}]", "").strip()
                     break
             
+            # 2. 渲染 UI 头部（头像）
             st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{moods.get(mood, "🌟")}</div></div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
             
-            # 使用 Google Cloud TTS 播放
-            speak_with_google_tts(full_text)
+            # 3. 准备并显示语音播放按钮 (核心修改点)
+            audio_bytes = get_google_tts_audio(full_text)
+            if audio_bytes:
+                st.markdown('<div class="audio-container"><b>🎧 听听老师怎么说：</b></div>', unsafe_allow_html=True)
+                st.audio(audio_bytes, format="audio/mp3")
+            else:
+                st.info("💡 提示：配置 Google TTS Key 可开启真人语音播放。")
+
+            # 4. 显示回答文字
+            st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
             
         except Exception as e:
             st.error(f"错误: {e}")
 
-# --- 模块 1：综合互动 (相机 + 麦克风) ---
+# --- 模块 1：综合互动 ---
 with tab1:
     st.subheader("实时互动实验室")
     col1, col2 = st.columns(2)
-    
     with col1:
         st.write("📸 **视觉捕捉**")
         img_file = st.camera_input("拍摄现场")
-    
     with col2:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
