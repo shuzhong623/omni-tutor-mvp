@@ -1,3 +1,6 @@
 streamlit
 google-generativeai
 Pillow
+streamlit-mic-recorder
+google-cloud-texttospeech
+requests
