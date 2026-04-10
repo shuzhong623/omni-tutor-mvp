@@ -7,7 +7,7 @@ import requests
 import base64
 from streamlit_mic_recorder import mic_recorder
 
-# ================= 1. 页面配置与视觉样式 =================
+# ================= 1. 页面配置 =================
 st.set_page_config(page_title="Omni-Tutor Pro", layout="wide", page_icon="🌟")
 
 st.markdown("""
@@ -20,18 +20,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏：密钥与设定 =================
+# ================= 2. 侧边栏 =================
 with st.sidebar:
     st.header("⚙️ 核心设置")
     gemini_key = st.text_input("Gemini API Key:", type="password")
     tts_key = st.text_input("Google TTS API Key:", type="password")
-    
     target_model_name = "models/gemini-2.5-flash"
     user_level = st.selectbox("用户级别", ["Baby", "Pupil", "Student"])
     lang_mode = st.selectbox("语言模式", ["English Only", "Chinese Only", "Mixed Mode"])
-    
-    st.divider()
-    st.markdown(f"**状态**: `{user_level}` | `{lang_mode}`")
 
 if not gemini_key:
     st.warning("⚠️ 请输入 Gemini API Key 以激活")
@@ -40,85 +36,65 @@ if not gemini_key:
 genai.configure(api_key=gemini_key)
 model = genai.GenerativeModel(target_model_name)
 
-# ================= 3. 核心功能模块 =================
+# ================= 3. 核心功能 =================
 
-# --- 改进的 Google Cloud TTS 函数 (返回音频字节) ---
 def get_google_tts_audio(text):
     if not tts_key:
         return None
-
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
-        # 这里的逻辑：如果是 Mixed Mode 或 English，优先用英文高质语音，如果是中文则用中文
-        # 为了简单，这里根据 lang_mode 决定
         voice_name = "en-US-Neural2-F" if lang_mode == "English Only" else "zh-CN-Neural2-A"
         lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
-        
         payload = {
             "input": {"text": text},
             "voice": {"languageCode": lang_code, "name": voice_name},
             "audioConfig": {"audioEncoding": "MP3"}
         }
         response = requests.post(url, json=payload)
+        
+        # --- 诊断增强：如果 API 报错，直接打印出来 ---
+        if response.status_code != 200:
+            st.error(f"❌ TTS API 报错 (状态码 {response.status_code}): {response.text}")
+            return None
+        # ------------------------------------------
+        
         audio_content = response.json().get("audioContent")
         if audio_content:
             return base64.b64decode(audio_content)
     except Exception as e:
-        st.error(f"TTS 接口调用失败: {e}")
+        st.error(f"TTS 系统故障: {e}")
         return None
 
-# --- 增强版 Prompt (强制 Mixed Mode) ---
 def get_full_prompt(module, content, is_vision=False, is_audio=False):
     persona_map = {
         "Baby": "亲切的幼儿园老师。多用叠词，简单温暖。",
         "Pupil": "幽默博学的大哥哥/大姐姐。引导探索，知识游戏化。",
         "Student": "睿智学术教练。苏格拉底式启发，简洁专业。"
     }
-    
     mode_instruction = ""
     if lang_mode == "Mixed Mode":
-        mode_instruction = """
-        CRITICAL TEACHING RULE: You MUST use 'Mixed Mode'. 
-        Even if the user speaks Chinese, you must:
-        1. Introduce 1-3 relevant English keywords or phrases in your answer.
-        2. Provide the English word -> Chinese translation -> Example sentence.
-        3. Encourage the user to repeat the English part.
-        """
+        mode_instruction = "CRITICAL: You MUST use 'Mixed Mode'. Integrate English keywords -> Translation -> Example sentence naturally."
     elif lang_mode == "English Only":
         mode_instruction = "STRICTLY use English only."
 
     constraint = "SAY ONLY THE WORDS YOU SPEAK. No stage directions. Start with mood tag: [HAPPY], [THINKING], [SURPRISED], [SERIOUS]."
-    
     prompt = f"Role: Omni-Tutor. Level: {user_level}. Mode: {lang_mode}. Personality: {persona_map[user_level]}. Module: {module}. {mode_instruction} {constraint}"
-    
-    if is_vision:
-        prompt += "\nVISION TASK: You see a photo. Naturally integrate visual objects into teaching."
-    if is_audio:
-        prompt += "\nAUDIO TASK: Analyze user's pronunciation. Correct mistakes and provide a 'Perfect Version' for mimicry."
-        
+    if is_vision: prompt += "\nVISION TASK: You see a photo. Interact with the objects."
+    if is_audio: prompt += "\nAUDIO TASK: Analyze pronunciation. Correct and provide a 'Perfect Version'."
     return f"{prompt}\n\nUser: {content}"
-
-# ================= 4. 主界面 =================
-st.title("🌟 Omni-Tutor 全能AI老师 Pro")
-st.markdown("---")
-
-tab1, tab2, tab3 = st.tabs(["🎙️ 语音/视觉互动", "📚 语言学习", "🌍 知识星球"])
 
 def handle_ai_response(module, user_input, media=None, audio_data=None):
     with st.spinner("老师正在倾听并思考..."):
         try:
             is_vision = True if media else False
             is_audio = True if audio_data else False
-            
             content_list = [get_full_prompt(module, user_input, is_vision, is_audio)]
             if media: content_list.append(media)
-            if audio_data: 
-                content_list.append({"mime_type": "audio/wav", "data": audio_data})
-                
+            if audio_data: content_list.append({"mime_type": "audio/wav", "data": audio_data})
+            
             response = model.generate_content(content_list)
             full_text = response.text
             
-            # 1. 处理情绪标签
             moods = {"HAPPY": "😊", "THINKING": "🤔", "SURPRISED": "😲", "SERIOUS": "🧐"}
             mood = "DEFAULT"
             for tag, emoji in moods.items():
@@ -127,24 +103,26 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
                     full_text = full_text.replace(f"[{tag}]", "").strip()
                     break
             
-            # 2. 渲染 UI 头部（头像）
             st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{moods.get(mood, "🌟")}</div></div>', unsafe_allow_html=True)
             
-            # 3. 准备并显示语音播放按钮 (核心修改点)
+            # 尝试获取音频
             audio_bytes = get_google_tts_audio(full_text)
             if audio_bytes:
                 st.markdown('<div class="audio-container"><b>🎧 听听老师怎么说：</b></div>', unsafe_allow_html=True)
                 st.audio(audio_bytes, format="audio/mp3")
             else:
-                st.info("💡 提示：配置 Google TTS Key 可开启真人语音播放。")
+                st.info("💡 提示：未能激活真人语音。请确认 Google TTS API Key 正确且已在 Cloud Console 中启用。")
 
-            # 4. 显示回答文字
             st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
-            
         except Exception as e:
             st.error(f"错误: {e}")
 
-# --- 模块 1：综合互动 ---
+# ================= 4. 主界面 =================
+st.title("🌟 Omni-Tutor 全能AI老师 Pro")
+st.markdown("---")
+
+tab1, tab2, tab3 = st.tabs(["🎙️ 语音/视觉互动", "📚 语言学习", "🌍 知识星球"])
+
 with tab1:
     st.subheader("实时互动实验室")
     col1, col2 = st.columns(2)
@@ -154,26 +132,22 @@ with tab1:
     with col2:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
-    
-    user_msg = st.text_input("你想对老师说什么？", placeholder="例如：老师，我的发音对吗？")
-    
+    user_msg = st.text_input("你想对老师说什么？")
     if st.button("发送给老师"):
         media = PIL.Image.open(img_file) if img_file else None
         audio = audio_record['bytes'] if audio_record else None
-        handle_ai_response("综合互动", user_msg if user_msg else "Please analyze my photo or audio!", media, audio)
+        handle_ai_response("综合互动", user_msg if user_msg else "Please analyze!", media, audio)
 
-# --- 模块 2：语言学习 ---
 with tab2:
-    st.subheader("语言学习 - 深度分析")
+    st.subheader("语言学习")
     up_file = st.file_uploader("上传照片", type=["jpg", "png"])
     up_req = st.text_input("要求")
-    if st.button("开始分析"):
+    if st.button("分析"):
         img = PIL.Image.open(up_file) if up_file else None
         handle_ai_response("语言学习", up_req, img)
 
-# --- 模块 3：知识星球 ---
 with tab3:
-    st.subheader("知识星球 - 全学科辅导")
+    st.subheader("知识星球")
     q = st.text_input("提问")
     if st.button("发送"):
         handle_ai_response("知识星球", q)
