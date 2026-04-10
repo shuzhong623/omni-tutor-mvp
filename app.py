@@ -40,25 +40,32 @@ model = genai.GenerativeModel(target_model_name)
 
 # ================= 3. 核心功能模块 =================
 
-# --- 极致纯净语音过滤器 ---
+# --- 修复后的：智能语音过滤器 ---
 def clean_text_for_tts(text):
-    """强力清除所有非语音字符，确保 TTS 不读标点和符号"""
-    # 1. 移除 [HAPPY] 等情绪标签
+    """智能清除干扰符号，但保留所有有意义的说话内容"""
+    # 1. 彻底移除 [HAPPY] 等情绪标签 (因为这些不需要读出来)
     text = re.sub(r'\[.*?\]', '', text)
-    # 2. 移除音标 /.../
-    text = re.sub(r'/[^/]+/?', '', text)
-    # 3. 移除括号内容 (...)
-    text = re.sub(r'\(.*?\)', '', text)
-    # 4. 移除所有 Markdown 符号：星号 (*), 反引号 (`), 下划线 (_), 井号 (#)
+    
+    # 2. 移除纯音标 /ai/ /ə/ 等 (通常是 /字母/ 格式)
+    # 仅删除短促的斜杠内容，保留正常的句子
+    text = re.sub(r'/[^/]{1,5}/', '', text)
+    
+    # 3. 关键修复：不再删除括号内容，而是删除括号符号本身
+    # 这样 AI 在括号里写的鼓励话语也会被读出来
+    text = text.replace('(', '').replace(')', '')
+    
+    # 4. 移除 Markdown 特殊符号 (星号, 反引号, 下划线, 井号)
     text = re.sub(r'[\*\`\_#]', '', text)
-    # 5. 移除特殊引号和美元符号
-    text = text.replace('"', '').replace('$', '').replace('$', '').replace('$', '')
-    # 6. 将换行符替换为空格
+    
+    # 5. 移除不需要的特殊引号和美元符
+    text = text.replace('"', '').replace('$', '')
+    
+    # 6. 将换行符替换为空格，使语音连续
     text = text.replace('\n', ' ')
+    
     return text.strip()
 
 def transcribe_audio(audio_bytes):
-    """利用 Gemini 2.5 将录音转为文字"""
     try:
         prompt = "Please transcribe this audio to text. Output ONLY the transcribed words, no other text."
         response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
@@ -71,8 +78,10 @@ def get_google_tts_audio(text):
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
         lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
-        # 使用过滤后的纯净文本
+        
+        # 使用修复后的过滤器
         clean_text = clean_text_for_tts(text)
+        
         payload = {
             "input": {"text": clean_text},
             "voice": {"languageCode": lang_code},
@@ -138,19 +147,14 @@ with tab1:
     with col2:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
-        
-        # --- 修复点：录音转写逻辑移至此，并使用 Session State 锁定 ---
         if audio_record:
-            # 为了防止重复转写，检查音频数据是否发生了变化
             if 'last_audio_data' not in st.session_state or st.session_state.last_audio_data != audio_record['bytes']:
                 st.session_state.last_audio_data = audio_record['bytes']
                 with st.spinner("正在听写..."):
                     transcript = transcribe_audio(audio_record['bytes'])
                     st.session_state['current_transcript'] = transcript
-        
         if 'current_transcript' in st.session_state:
             st.markdown(f'<div class="transcript-box"><b>🎙️ 你刚才说：</b> {st.session_state["current_transcript"]}</div>', unsafe_allow_html=True)
-    
     user_msg = st.text_input("你想对老师说什么？", placeholder="如果你录了音，可以直接点击发送")
     if st.button("发送给老师"):
         final_msg = user_msg
