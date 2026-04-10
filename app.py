@@ -44,17 +44,13 @@ def get_google_tts_audio(text):
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
         
-        # --- 修改点：使用兼容性最强的 Wavenet 声音，避免 400 错误 ---
-        if lang_mode == "English Only":
-            voice_name = "en-US-Wavenet-F" # 通用高质女声
-            lang_code = "en-US"
-        else:
-            voice_name = "zh-CN-Wavenet-A" # 通用高质女声
-            lang_code = "zh-CN"
+        # --- 核心修改点：删除具体声音名称(name)，仅保留语言代码(languageCode) ---
+        # 这样 Google 会自动为你选择当前账户可用且最匹配的默认声音，彻底避免 400 错误
+        lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
         
         payload = {
             "input": {"text": text},
-            "voice": {"languageCode": lang_code, "name": voice_name},
+            "voice": {"languageCode": lang_code}, # 不再指定 name
             "audioConfig": {"audioEncoding": "MP3"}
         }
         response = requests.post(url, json=payload)
