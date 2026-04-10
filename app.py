@@ -7,7 +7,7 @@ import requests
 import base64
 from streamlit_mic_recorder import mic_recorder
 
-# ================= 1. 页面配置 =================
+# ================= 1. 页面配置与视觉样式 =================
 st.set_page_config(page_title="Omni-Tutor Pro", layout="wide", page_icon="🌟")
 
 st.markdown("""
@@ -43,8 +43,15 @@ def get_google_tts_audio(text):
         return None
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
-        voice_name = "en-US-Neural2-F" if lang_mode == "English Only" else "zh-CN-Neural2-A"
-        lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
+        
+        # --- 修改点：使用兼容性最强的 Wavenet 声音，避免 400 错误 ---
+        if lang_mode == "English Only":
+            voice_name = "en-US-Wavenet-F" # 通用高质女声
+            lang_code = "en-US"
+        else:
+            voice_name = "zh-CN-Wavenet-A" # 通用高质女声
+            lang_code = "zh-CN"
+        
         payload = {
             "input": {"text": text},
             "voice": {"languageCode": lang_code, "name": voice_name},
@@ -52,11 +59,9 @@ def get_google_tts_audio(text):
         }
         response = requests.post(url, json=payload)
         
-        # --- 诊断增强：如果 API 报错，直接打印出来 ---
         if response.status_code != 200:
-            st.error(f"❌ TTS API 报错 (状态码 {response.status_code}): {response.text}")
+            st.error(f"❌ TTS API 报错 ({response.status_code}): {response.text}")
             return None
-        # ------------------------------------------
         
         audio_content = response.json().get("audioContent")
         if audio_content:
@@ -105,13 +110,12 @@ def handle_ai_response(module, user_input, media=None, audio_data=None):
             
             st.markdown(f'<div class="avatar-container"><div style="font-size: 80px;">{moods.get(mood, "🌟")}</div></div>', unsafe_allow_html=True)
             
-            # 尝试获取音频
             audio_bytes = get_google_tts_audio(full_text)
             if audio_bytes:
                 st.markdown('<div class="audio-container"><b>🎧 听听老师怎么说：</b></div>', unsafe_allow_html=True)
                 st.audio(audio_bytes, format="audio/mp3")
             else:
-                st.info("💡 提示：未能激活真人语音。请确认 Google TTS API Key 正确且已在 Cloud Console 中启用。")
+                st.info("💡 提示：未能激活真人语音。请确认 API Key 已在 Cloud Console 中启用。")
 
             st.markdown(f'<div class="response-box">{full_text}</div>', unsafe_allow_html=True)
         except Exception as e:
