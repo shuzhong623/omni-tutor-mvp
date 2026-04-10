@@ -18,7 +18,7 @@ st.markdown("""
     .avatar-container { text-align: center; margin-bottom: 10px; }
     .response-box { background-color: white; padding: 20px; border-radius: 15px; border-left: 5px solid #4A90E2; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); font-size: 18px; line-height: 1.6; }
     .audio-container { margin-bottom: 15px; background: #eef2f6; padding: 10px; border-radius: 10px; text-align: center; }
-    .transcript-box { background-color: #fffbe6; padding: 10px; border-radius: 10px; border: 1px dashed #ffe58f; color: #856404; font-style: italic; margin-bottom: 15px; }
+    .transcript-box { background-color: #fffbe6; padding: 15px; border-radius: 10px; border: 1px dashed #ffe58f; color: #856404; font-style: italic; margin-bottom: 15px; font-size: 16px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -40,31 +40,41 @@ model = genai.GenerativeModel(target_model_name)
 
 # ================= 3. 核心功能模块 =================
 
-# --- 新增：语音转文字函数 ---
+# --- 极致纯净语音过滤器 ---
+def clean_text_for_tts(text):
+    """强力清除所有非语音字符，确保 TTS 不读标点和符号"""
+    # 1. 移除 [HAPPY] 等情绪标签
+    text = re.sub(r'\[.*?\]', '', text)
+    # 2. 移除音标 /.../
+    text = re.sub(r'/[^/]+/?', '', text)
+    # 3. 移除括号内容 (...)
+    text = re.sub(r'\(.*?\)', '', text)
+    # 4. 移除所有 Markdown 符号：星号 (*), 反引号 (`), 下划线 (_), 井号 (#)
+    text = re.sub(r'[\*\`\_#]', '', text)
+    # 5. 移除特殊引号和美元符号
+    text = text.replace('"', '').replace('$', '').replace('$', '').replace('$', '')
+    # 6. 将换行符替换为空格
+    text = text.replace('\n', ' ')
+    return text.strip()
+
 def transcribe_audio(audio_bytes):
-    """利用 Gemini 2.5 的原生多模态能力将语音转为文字"""
+    """利用 Gemini 2.5 将录音转为文字"""
     try:
-        # 极简 Prompt，要求 AI 只输出转写内容
         prompt = "Please transcribe this audio to text. Output ONLY the transcribed words, no other text."
         response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
         return response.text.strip()
     except Exception as e:
         return f"转写失败: {e}"
 
-def clean_text_for_tts(text):
-    text = re.sub(r'/[^/]+/?', '', text)
-    text = re.sub(r'\(.*?\)', '', text)
-    text = re.sub(r'\[.*?\]', '', text)
-    text = text.replace('*', '').replace('"', '').replace('$', '')
-    return text.strip()
-
 def get_google_tts_audio(text):
     if not tts_key: return None
     try:
         url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={tts_key}"
         lang_code = "en-US" if lang_mode == "English Only" else "zh-CN"
+        # 使用过滤后的纯净文本
+        clean_text = clean_text_for_tts(text)
         payload = {
-            "input": {"text": clean_text_for_tts(text)},
+            "input": {"text": clean_text},
             "voice": {"languageCode": lang_code},
             "audioConfig": {"audioEncoding": "MP3"}
         }
@@ -88,7 +98,7 @@ def get_full_prompt(module, content, is_vision=False, is_audio=False):
     return f"{prompt}\n\nUser: {content}"
 
 def handle_ai_response(module, user_input, media=None, audio_data=None):
-    with st.spinner("老师正在倾听并思考..."):
+    with st.spinner("老师正在思考..."):
         try:
             is_vision = True if media else False
             is_audio = True if audio_data else False
@@ -129,23 +139,23 @@ with tab1:
         st.write("🎤 **语音输入 (发音练习)**")
         audio_record = mic_recorder(start_prompt="点击开始录音", stop_prompt="停止录音", key='recorder')
         
-        # --- 核心升级：录音后立即转写文字 ---
+        # --- 修复点：录音转写逻辑移至此，并使用 Session State 锁定 ---
         if audio_record:
-            with st.spinner("正在将语音转化为文字..."):
-                transcript = transcribe_audio(audio_record['bytes'])
-                st.session_state['current_transcript'] = transcript
+            # 为了防止重复转写，检查音频数据是否发生了变化
+            if 'last_audio_data' not in st.session_state or st.session_state.last_audio_data != audio_record['bytes']:
+                st.session_state.last_audio_data = audio_record['bytes']
+                with st.spinner("正在听写..."):
+                    transcript = transcribe_audio(audio_record['bytes'])
+                    st.session_state['current_transcript'] = transcript
         
         if 'current_transcript' in st.session_state:
             st.markdown(f'<div class="transcript-box"><b>🎙️ 你刚才说：</b> {st.session_state["current_transcript"]}</div>', unsafe_allow_html=True)
     
-    user_msg = st.text_input("你想对老师说什么？", placeholder="如果你录了音，可以直接点击发送；或者在这里输入问题")
-    
+    user_msg = st.text_input("你想对老师说什么？", placeholder="如果你录了音，可以直接点击发送")
     if st.button("发送给老师"):
-        # 如果用户没打字但录了音，使用转写文字作为输入
         final_msg = user_msg
         if not final_msg and 'current_transcript' in st.session_state:
             final_msg = st.session_state['current_transcript']
-            
         media = PIL.Image.open(img_file) if img_file else None
         audio = audio_record['bytes'] if audio_record else None
         handle_ai_response("综合互动", final_msg if final_msg else "Please analyze!", media, audio)
